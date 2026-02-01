@@ -1,0 +1,12 @@
+# virtual environment
+.venv/
+
+# IDE
+.idea/
+
+# python cache
+__pycache__/
+
+# raw and generated data
+data/raw/*.xlsm
+data/processed/*.csv
