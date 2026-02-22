@@ -1,12 +1,23 @@
-# virtual environment
+# env
 .venv/
-
-# IDE
-.idea/
-
-# python cache
+venv/
 __pycache__/
+*.py[cod]
 
-# raw and generated data
-data/raw/*.xlsm
-data/processed/*.csv
+# data folders (обычно большие/воспроизводимые)
+data/raw/
+data/external/
+data/processed/
+temp/
+
+data/registry/*.xlsx
+
+# temp/debug
+temp/
+*.log
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
