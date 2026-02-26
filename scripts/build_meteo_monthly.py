@@ -4,8 +4,8 @@ from pathlib import Path
 import pandas as pd
 
 
-IN_PATH = Path("data/processed/meteo_daily_1991_2000.csv")
-OUT_PATH = Path("data/processed/meteo_monthly_1991_2000.csv")
+IN_PATH = Path("data/processed/meteo_daily_1991_2020.csv")
+OUT_PATH = Path("data/processed/meteo_monthly_1991_2020.csv")
 
 
 def main() -> None:

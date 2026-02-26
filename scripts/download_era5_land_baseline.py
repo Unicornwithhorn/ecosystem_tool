@@ -47,7 +47,7 @@ def download(year_from: int, year_to: int, out_name: str):
     print("Done:", target)
 
 def main():
-    for y in range(1991, 2001):
+    for y in range(2001, 2021):
         download(y, y, f"era5land_{y}.nc")
 
 

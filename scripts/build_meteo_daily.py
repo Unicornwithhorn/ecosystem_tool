@@ -7,7 +7,7 @@ import zipfile
 
 
 IN_DIR = Path("data/external")
-OUT_PATH = Path("data/processed/meteo_daily_1991_2000.csv")
+OUT_PATH = Path("data/processed/meteo_daily_1991_2020.csv")
 OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 def ensure_time_dim(ds: xr.Dataset) -> xr.Dataset:

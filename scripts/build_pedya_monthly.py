@@ -3,10 +3,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-IN_PATH = Path("data/processed/meteo_monthly_1991_2000.csv")
-OUT_NORMALS = Path("data/processed/meteo_monthly_normals_1991_2000.csv")
-OUT_PEDYA_MONTHLY = Path("data/processed/meteo_pedya_monthly_1991_2000.csv")
-OUT_PEDYA_PERIODS = Path("data/processed/meteo_pedya_periods_1991_2000.csv")
+IN_PATH = Path("data/processed/meteo_monthly_1991_2020.csv")
+OUT_NORMALS = Path("data/processed/meteo_monthly_normals_1991_2020.csv")
+OUT_PEDYA_MONTHLY = Path("data/processed/meteo_pedya_monthly_1991_2020.csv")
+OUT_PEDYA_PERIODS = Path("data/processed/meteo_pedya_periods_1991_2020.csv")
 
 EPS = 1e-9
 
