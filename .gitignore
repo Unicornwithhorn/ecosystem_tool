@@ -9,6 +9,7 @@ data/raw/
 data/external/
 data/processed/
 temp/
+data/cache/
 
 data/registry/*.xlsx
 *napshot*
