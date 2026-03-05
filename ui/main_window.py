@@ -1,125 +1,209 @@
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout,
-    QPushButton, QLabel, QComboBox
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QComboBox,
+    QSplitter, QScrollArea, QSizePolicy, QHeaderView
 )
-
+from core.analysis_engine import load_processed, apply_filters
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt
 from core.scenario_runner import run_scenario, ScenarioSpec
 from core.analysis_engine import load_processed
 from PySide6.QtWidgets import QLineEdit, QTableWidget, QTableWidgetItem
 from types import SimpleNamespace
+from ui.panel_tab import PanelTab
 import math
+import pandas as pd
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ecosystem Analysis Tool")
 
-        central = QWidget()
-        layout = QVBoxLayout()
-
+        # -------------------------
+        # Create widgets FIRST
+        # -------------------------
         self.river = QComboBox()
         self.geom = QComboBox()
         self.impact = QComboBox()
+
         self.mode = QComboBox()
         self.scale = QComboBox()
-        self.scale.addItems(["M", "T", "N", "R"])
-        self.scale.setEnabled(False)  # активен только в ecospectrum
         self.period_combo = QComboBox()
-        self.period_combo.addItems(["DJF", "MAM", "JJA", "SON", "cold_half_year", "warm_half_year"])
-        self.period_combo.setEnabled(False)
-
         self.climate_var = QComboBox()
-        self.climate_var.addItems(["pedya", "precip_mm", "t_mean_c"])
-        self.climate_var.setEnabled(False)  # активен в climate и batch
-
-        # --- Batch controls (Eco vs Climate batch) ---
-        self.periods_edit = QLineEdit("JJA,warm_half_year,MAM,DJF")
-        self.lags_edit = QLineEdit("0,1,2")
-        self.windows_edit = QLineEdit("1,2,3")
-
-        self.run_batch_btn = QPushButton("Run batch")
-        self.run_batch_btn.clicked.connect(self.run_batch)
-
-        self.batch_table = QTableWidget()
-        self.batch_table.setColumnCount(8)
-        self.batch_table.setHorizontalHeaderLabels([
-            "period", "lag", "window", "n", "pearson_r", "spearman_rho", "|r|", "plot"
-        ])
-        self.batch_table.setSortingEnabled(True)
-        self.batch_table.cellClicked.connect(self.on_batch_row_clicked)
-
-        # hidden unless batch-mode is active
-        for w in [self.periods_edit, self.lags_edit, self.windows_edit, self.run_batch_btn, self.batch_table]:
-            w.setVisible(False)
-
-        self.mode.addItems([
-            "Projective cover (classic)",
-            "Ellenberg ecospectrum",
-            "Climate: Pedya index",
-            "Eco vs Climate (batch)"
-        ])
-        self.mode.setItemData(0, "classic")
-        self.mode.setItemData(1, "ecospectrum")
-        self.mode.setItemData(2, "climate")
-        self.mode.setItemData(3, "eco_vs_climate_batch")
-
         self.eco_metric = QComboBox()
-        self.eco_metric.addItems(["cwm", "sigma", "w_median", "w_min", "w_max"])
-        self.eco_metric.setEnabled(False)  # включим только в eco-режиме
+        self.affor = QComboBox()
 
-        self.run_btn = QPushButton("Run scenario")
+        self.periods_edit = QLineEdit()
+        self.lags_edit = QLineEdit()
+        self.windows_edit = QLineEdit()
+
+        self.run_btn = QPushButton("Run")
+        self.run_batch_btn = QPushButton("Run batch")
+
+        self.batch_table = QTableWidget(0, 12)
+        self.batch_table.setHorizontalHeaderLabels([
+            "period", "lag", "window", "n_years",
+            "pearson_r", "|r|", "p", "p_shift",
+            "spearman_rho", "p_s",
+            "years", "plot"
+        ])
+
+
+        self.plot_label = QLabel("Plot will appear here")
+        self.plot_label.setAlignment(Qt.AlignCenter)
+
+        # ВАЖНО: график не должен "вытеснять" таблицу своим sizeHint от pixmap
+        self.plot_label.setMinimumHeight(0)
+        self.plot_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
+        self.batch_table.setMinimumHeight(160)
+
         self.output = QLabel("")
+        self.output.setWordWrap(True)
+
+        self._last_plot_path = ""
 
         self.run_btn.clicked.connect(self.run)
+        self.run_batch_btn.clicked.connect(self.run_batch)
         self.mode.currentIndexChanged.connect(self.on_mode_changed)
+        self.batch_table.cellClicked.connect(self.on_batch_row_clicked)
 
-        self.plot_label = QLabel()
-        self.plot_label.setAlignment(Qt.AlignCenter)
-        self.plot_label.setMinimumHeight(300)  # чтобы было видно даже в маленьком окне
-        self.plot_label.setText("Plot will appear here")
+        # modes
+        self.mode.addItem("Classic", "classic")
+        self.mode.addItem("Ecospectrum", "ecospectrum")
+        self.mode.addItem("Climate", "climate")
+        self.mode.addItem("Eco vs Climate (batch)", "eco_vs_climate_batch")
+        self.mode.addItem("Panel climate", "panel_climate")
+        self.mode.addItem("Panel climate (batch)", "panel_climate_batch")
 
-        self._last_plot_path = None
+        # ellenberg scales
+        for s in ["L", "T", "K", "F", "R", "N", "S", "M"]:
+            self.scale.addItem(s)
 
-        layout.addWidget(QLabel("River"))
-        layout.addWidget(self.river)
-        layout.addWidget(QLabel("Geomorphology"))
-        layout.addWidget(self.geom)
-        layout.addWidget(QLabel("Impact type"))
-        layout.addWidget(self.impact)
-        layout.addWidget(QLabel("Analysis mode"))
-        layout.addWidget(self.mode)
-        layout.addWidget(QLabel("Ellenberg scale (for ecospectrum mode)"))
-        layout.addWidget(self.scale)
-        layout.addWidget(QLabel("Period:"))
-        layout.addWidget(self.period_combo)
-        layout.addWidget(QLabel("Climate variable:"))
-        layout.addWidget(self.climate_var)
-        layout.addWidget(QLabel("Batch periods (comma):"))
-        layout.addWidget(self.periods_edit)
-        layout.addWidget(QLabel("Batch lags (comma):"))
-        layout.addWidget(self.lags_edit)
-        layout.addWidget(QLabel("Batch windows (comma):"))
-        layout.addWidget(self.windows_edit)
-        layout.addWidget(self.run_batch_btn)
+        # eco metrics
+        for m in ["cwm", "sigma", "w_median", "w_min", "w_max"]:
+            self.eco_metric.addItem(m)
 
-        layout.addWidget(self.batch_table)
+        # climate var
+        self.climate_var.addItems(["pedya", "precip_mm", "t_mean_c"])
 
-        layout.addWidget(QLabel("Eco metric (for ecospectrum mode)"))
-        layout.addWidget(self.eco_metric)
+        # periods (для climate режима)
+        self.period_combo.addItems(["DJF", "MAM", "JJA", "SON", "cold_half_year", "warm_half_year"])
 
-        layout.addWidget(self.run_btn)
-        layout.addWidget(self.plot_label)
+        # defaults for batch edits
+        self.periods_edit.setText("JJA,warm_half_year,MAM,DJF")
+        self.lags_edit.setText("0,1,2")
+        self.windows_edit.setText("1,2,3")
 
-        layout.addWidget(self.output)
+        # afforestation (облесённость)
+        self.affor.addItem("All", None)
+        self.affor.addItem("Луг (0)", [0])
+        self.affor.addItem("Редколесье (1)", [1])
+        self.affor.addItem("Лес (2)", [2])
+        self.affor.addItem("Луг + редколесье (0,1)", [0, 1])
+        self.affor.addItem("Редколесье + лес (1,2)", [1, 2])
 
-        central.setLayout(layout)
+        central = QWidget()
+        root_layout = QHBoxLayout(central)
+
+        splitter = QSplitter(Qt.Horizontal)
+        root_layout.addWidget(splitter)
+
+        # -------------------------
+        # LEFT PANEL (controls)
+        # -------------------------
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setSpacing(6)
+
+        # ВАЖНО: сюда добавляем ВСЕ элементы меню (как раньше), но теперь в left_layout
+        left_layout.addWidget(QLabel("River"))
+        left_layout.addWidget(self.river)
+        left_layout.addWidget(QLabel("Geomorphology"))
+        left_layout.addWidget(self.geom)
+        left_layout.addWidget(QLabel("Impact type"))
+        left_layout.addWidget(self.impact)
+        left_layout.addWidget(QLabel("Облесённость"))
+        left_layout.addWidget(self.affor)
+        left_layout.addWidget(QLabel("Analysis mode"))
+        left_layout.addWidget(self.mode)
+        left_layout.addWidget(QLabel("Ellenberg scale (for ecospectrum mode)"))
+        left_layout.addWidget(self.scale)
+        left_layout.addWidget(QLabel("Period:"))
+        left_layout.addWidget(self.period_combo)
+        left_layout.addWidget(QLabel("Climate variable:"))
+        left_layout.addWidget(self.climate_var)
+
+        left_layout.addWidget(QLabel("Batch periods (comma):"))
+        left_layout.addWidget(self.periods_edit)
+        left_layout.addWidget(QLabel("Batch lags (comma):"))
+        left_layout.addWidget(self.lags_edit)
+        left_layout.addWidget(QLabel("Batch windows (comma):"))
+        left_layout.addWidget(self.windows_edit)
+
+        left_layout.addWidget(self.run_batch_btn)
+
+        left_layout.addWidget(QLabel("Eco metric (for ecospectrum mode)"))
+        left_layout.addWidget(self.eco_metric)
+
+        left_layout.addWidget(self.run_btn)
+        left_layout.addStretch(1)
+
+        # Делаем левую панель прокручиваемой
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setWidget(left_panel)
+
+        # -------------------------
+        # RIGHT PANEL (results)
+        # -------------------------
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(8, 8, 8, 8)
+        right_layout.setSpacing(8)
+
+        # Таблица должна быть “жирной” и занимать место
+        self.batch_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.batch_table.horizontalHeader().setStretchLastSection(True)
+
+
+        # График — тоже растягиваемый
+        self.plot_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # Вертикальный сплиттер: таблица сверху, график снизу, лог внизу
+        self.right_splitter = QSplitter(Qt.Vertical)
+        self.right_splitter.addWidget(self.batch_table)
+        self.right_splitter.addWidget(self.plot_label)
+        self.right_splitter.addWidget(self.output)
+
+        # Пропорции по умолчанию: таблица видима всегда
+        self.right_splitter.setSizes([260, 640, 80])
+
+        right_layout.addWidget(self.right_splitter)
+
+        # Добавляем панели в splitter
+        splitter.addWidget(left_scroll)
+        splitter.addWidget(right_panel)
+
+        # Пропорции: слева меню уже, справа результаты шире
+        splitter.setStretchFactor(0, 1)  # left
+        splitter.setStretchFactor(1, 3)  # right
+
+        # Начальная ширина (можно под себя)
+        splitter.setSizes([340, 900])
+
         self.setCentralWidget(central)
 
         # <-- автозаполнение
         self.populate_dropdowns()
         self.on_mode_changed()
+
+        self.batch_table.setAlternatingRowColors(True)
+        self.batch_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.batch_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.batch_table.setSortingEnabled(True)
+        self.batch_table.horizontalHeader().setSortIndicatorShown(True)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -133,6 +217,31 @@ class MainWindow(QMainWindow):
                 )
                 self.plot_label.setPixmap(scaled)
 
+    def _show_df_in_table(self, df: pd.DataFrame):
+        self.batch_table.setVisible(True)
+
+        self.batch_table.setSortingEnabled(False)
+        self.batch_table.setUpdatesEnabled(False)
+
+        self.batch_table.clearContents()
+        self.batch_table.setRowCount(len(df))
+        self.batch_table.setColumnCount(len(df.columns))
+        self.batch_table.setHorizontalHeaderLabels([str(c) for c in df.columns])
+
+        for i in range(len(df)):
+            for j, col in enumerate(df.columns):
+                val = df.iloc[i, j]
+                if isinstance(val, float):
+                    txt = f"{val:.6g}"
+                else:
+                    txt = "" if val is None else str(val)
+                self.batch_table.setItem(i, j, QTableWidgetItem(txt))
+
+        self.batch_table.resizeColumnsToContents()
+
+        self.batch_table.setUpdatesEnabled(True)
+        self.batch_table.setSortingEnabled(True)
+
     def _parse_int_list(self, s: str):
         return [int(x.strip()) for x in s.split(",") if x.strip()]
 
@@ -140,18 +249,40 @@ class MainWindow(QMainWindow):
         return [x.strip() for x in s.split(",") if x.strip()]
 
     def on_batch_row_clicked(self, row: int, col: int):
-        if not hasattr(self, "_batch_rows") or row >= len(self._batch_rows):
+        if not hasattr(self, "_batch_rows"):
             return
 
-        r = self._batch_rows[row]
+        item0 = self.batch_table.item(row, 0)
+        if item0 is None:
+            return
+
+        src_i = item0.data(256)
+        if src_i is None or src_i >= len(self._batch_rows):
+            return
+
+        r = self._batch_rows[src_i]
+
+        alpha = 0.05
+        ny = int(r.get("n_years", r.get("n", 0)) or 0)
+        pps = r.get("pearson_p_shift", float("nan"))
+
+        bad_p = (not isinstance(pps, float)) or math.isnan(pps) or (pps > alpha)
+        low_n = ny < 6
+
+        if low_n or bad_p:
+            self.output.setText(
+                "BLOCKED\n"
+                f"Причина: {'n_years < 6' if low_n else ''} "
+                f"{'p_shift > 0.05 / nan' if bad_p else ''}\n"
+                f"n_years={ny}, p_shift={pps}"
+            )
+            return
+
         spec = r["spec"]
 
-        # на всякий случай синхронизируем с текущим выбором в UI
-        # (если ты батч запускал с одним climate_var, а потом переключил dropdown)
         spec.climate_var = getattr(spec, "climate_var", None) or self.climate_var.currentText()
         climate_var = spec.climate_var
 
-        # второй прогон — уже с plot (одна картинка для выбранной комбинации)
         spec.plot = {
             "title": f"{spec.eco_metric}({spec.trait_scale}) vs {climate_var}({spec.period}) "
                      f"lag={spec.lag} win={spec.window}",
@@ -173,106 +304,231 @@ class MainWindow(QMainWindow):
         )
 
     def run_batch(self):
-        # 1) Eco-настройки из UI
-        river = self.river.currentText()
-        geom = self.geom.currentText()
-        impact = self.impact.currentText()
+        try:
+            # 1) Eco-настройки из UI
+            river = self.river.currentText()
+            geom = self.geom.currentText()
+            impact = self.impact.currentText()
 
-        scale = self.scale.currentText()
-        eco_metric = self.eco_metric.currentText()
+            scale = self.scale.currentText()
+            eco_metric = self.eco_metric.currentText()
 
-        filters = {}
+            filters = {}
 
-        geom_value = self.geom.currentText()
-        if geom_value != "All":
-            filters["geomorph_level"] = geom_value
+            aff = self.affor.currentData()
+            if aff is not None:
+                filters["afforestation"] = {"in": aff}
 
-        river_value = self.river.currentText()
-        if river_value != "All":
-            filters["source_file"] = {"contains": river_value}
+            self.output.setText(f"Running batch...\nFilters: {filters}")
 
-        impact_value = self.impact.currentText()
-        if impact_value != "All":
-            filters["impact_type"] = impact_value
+            geom_value = self.geom.currentText()
+            if geom_value != "All":
+                filters["geomorph_level"] = geom_value
 
-        periods = self._parse_str_list(self.periods_edit.text())
-        lags = self._parse_int_list(self.lags_edit.text())
-        windows = self._parse_int_list(self.windows_edit.text())
+            river_value = self.river.currentText()
+            if river_value != "All":
+                filters["source_file"] = {"contains": river_value}
 
-        # 2) Прогон
-        rows = []
-        total = len(periods) * len(lags) * len(windows)
-        k = 0
+            impact_value = self.impact.currentText()
+            if impact_value != "All":
+                filters["impact_type"] = impact_value
 
-        for period in periods:
-            for lag in lags:
-                for window in windows:
-                    k += 1
-                    spec = SimpleNamespace(
-                        name=f"ui_batch_{scale}_{eco_metric}_{period}_lag{lag}_win{window}",
-                        analysis="eco_vs_climate",
-                        filters=filters,
-                        trait_scale=scale,
-                        eco_metric=eco_metric,
-                        period=period,
-                        lag=lag,
-                        window=window,
-                        climate_var = self.climate_var.currentText(),
-                        plot=None,  # в батче картинки не строим
-                    )
-                    try:
-                        df, _ = run_scenario(spec)
-                        n = len(df)
-                        if n > 0:
-                            pearson = float(df["pearson_r"].iloc[0])
-                            spearman = float(df["spearman_rho"].iloc[0])
-                            absr = abs(pearson) if not math.isnan(pearson) else float("nan")
-                        else:
-                            pearson = float("nan")
-                            spearman = float("nan")
-                            absr = float("nan")
+            periods = self._parse_str_list(self.periods_edit.text())
+            lags = self._parse_int_list(self.lags_edit.text())
+            windows = self._parse_int_list(self.windows_edit.text())
 
-                        rows.append({
-                            "period": period, "lag": lag, "window": window, "n": n,
-                            "pearson_r": pearson, "spearman_rho": spearman, "abs_r": absr,
-                            "spec": spec,  # сохраним spec для клика по строке
-                        })
+            df0 = load_processed()
+            df1 = apply_filters(df0, filters)
+            self.output.setText(self.output.text() + f"\nAfter filters: rows={len(df1)}")
 
-                    except Exception as e:
-                        rows.append({
-                            "period": period, "lag": lag, "window": window, "n": 0,
-                            "pearson_r": float("nan"), "spearman_rho": float("nan"), "abs_r": float("nan"),
-                            "spec": spec,
-                            "error": str(e),
-                        })
+            # 2) Прогон
+            rows = []
+            total = len(periods) * len(lags) * len(windows)
+            k = 0
 
-        # 3) Заполняем таблицу
-        self._batch_rows = rows  # сохраним для on_batch_row_clicked
-        self.batch_table.setRowCount(len(rows))
+            for period in periods:
+                for lag in lags:
+                    for window in windows:
+                        k += 1
+                        spec = SimpleNamespace(
+                            name=f"ui_batch_{scale}_{eco_metric}_{period}_lag{lag}_win{window}",
+                            analysis="eco_vs_climate",
+                            filters=filters,
+                            trait_scale=scale,
+                            eco_metric=eco_metric,
+                            period=period,
+                            lag=lag,
+                            window=window,
+                            climate_var = self.climate_var.currentText(),
+                            plot=None,  # в батче картинки не строим
+                        )
+                        try:
+                            df, _ = run_scenario(spec)
+                            n = len(df)
+                            if n > 0:
+                                pearson = float(df["pearson_r"].iloc[0])
+                                spearman = float(df["spearman_rho"].iloc[0])
+                                absr = abs(pearson) if not math.isnan(pearson) else float("nan")
+                            else:
+                                pearson = float("nan")
+                                spearman = float("nan")
+                                absr = float("nan")
 
-        for i, r in enumerate(rows):
-            def put(col, val):
-                item = QTableWidgetItem("" if val is None else str(val))
-                self.batch_table.setItem(i, col, item)
+                            # df — это joined по годам, но r/p лежат одинаковыми во всех строках
+                            if len(df) == 0:
+                                pearson_r = float("nan");
+                                spearman_rho = float("nan")
+                                pearson_p = float("nan");
+                                pearson_p_shift = float("nan")
+                                spearman_p = float("nan")
+                                n_years = 0;
+                                year_min = None;
+                                year_max = None
+                            else:
+                                pearson_r = float(df["pearson_r"].iloc[0])
+                                spearman_rho = float(df["spearman_rho"].iloc[0])
+                                pearson_p = float(df["pearson_p"].iloc[0])
+                                pearson_p_shift = float(df["pearson_p_shift"].iloc[0])
+                                spearman_p = float(df["spearman_p"].iloc[0])
+                                n_years = int(df["n_years"].iloc[0])
+                                year_min = int(df["year_min"].iloc[0]) if pd.notna(df["year_min"].iloc[0]) else None
+                                year_max = int(df["year_max"].iloc[0]) if pd.notna(df["year_max"].iloc[0]) else None
 
-            put(0, r["period"])
-            put(1, r["lag"])
-            put(2, r["window"])
-            put(3, r["n"])
-            put(4,
-                f"{r['pearson_r']:.3f}" if isinstance(r["pearson_r"], float) and not math.isnan(r["pearson_r"]) else "")
-            put(5, f"{r['spearman_rho']:.3f}" if isinstance(r["spearman_rho"], float) and not math.isnan(
-                r["spearman_rho"]) else "")
-            put(6, f"{r['abs_r']:.3f}" if isinstance(r["abs_r"], float) and not math.isnan(r["abs_r"]) else "")
-            put(7, "click")  # просто маркер
+                            years_txt = "" if (year_min is None or year_max is None) else f"{year_min}–{year_max}"
 
-        self.output.setText(
-            f"BATCH DONE\n"
-            f"Eco: scale={scale}, metric={eco_metric}\n"
-            f"Filters: {filters}\n"
-            f"Combos: {total}\n"
-            f"Tip: click a row to plot scatter."
-        )
+                            rows.append({
+                                "period": period, "lag": lag, "window": window, "n": n,
+                                "pearson_r": pearson, "spearman_rho": spearman, "abs_r": absr,
+                                "spec": spec,  # сохраним spec для клика по строке
+                                "n_years": n_years,
+                                "pearson_p": pearson_p,
+                                "pearson_p_shift": pearson_p_shift,
+                                "spearman_p": spearman_p,
+                                "years": years_txt,
+                            })
+
+                        except Exception as e:
+                            rows.append({
+                                "period": period, "lag": lag, "window": window, "n": 0,
+                                "pearson_r": float("nan"), "spearman_rho": float("nan"), "abs_r": float("nan"),
+                                "spec": spec,
+                                "error": str(e),
+                            })
+
+            # 3) Заполняем таблицу
+            self._batch_rows = rows
+            # гарантируем, что таблица в корректном состоянии
+            self.batch_table.setVisible(True)
+
+            self.batch_table.setColumnCount(12)
+            self.batch_table.setHorizontalHeaderLabels([
+                "period", "lag", "window", "n_years",
+                "pearson_r", "|r|", "p", "p_shift",
+                "spearman_rho", "p_s",
+                "years", "plot"
+            ])
+
+            self.batch_table.horizontalHeader().setVisible(True)
+            self.batch_table.verticalHeader().setVisible(True)
+            self.batch_table.setShowGrid(True)
+
+            # важно: очистить старые items (setRowCount НЕ удаляет содержимое полностью)
+            self.batch_table.setSortingEnabled(False)
+            self.batch_table.setUpdatesEnabled(False)
+            self.batch_table.clearContents()
+            self.batch_table.setRowCount(len(rows))
+
+            for i, r in enumerate(rows):
+                def put(col, text: str, sort_value=None):
+                    item = QTableWidgetItem("" if text is None else str(text))
+                    if sort_value is not None:
+                        item.setData(0, sort_value)  # DisplayRole used for sorting
+                    self.batch_table.setItem(i, col, item)
+
+                # 0 period
+                put(0, r.get("period", ""))
+
+                # 1 lag, 2 window
+                lag = r.get("lag", None)
+                win = r.get("window", None)
+                put(1, "" if lag is None else str(lag), sort_value=lag)
+                put(2, "" if win is None else str(win), sort_value=win)
+
+                # 3 n_years
+                ny = r.get("n_years", r.get("n", None))
+                put(3, "" if ny is None else str(ny), sort_value=ny)
+
+                # 4 pearson_r
+                pr = r.get("pearson_r", float("nan"))
+                put(4, "" if not isinstance(pr, float) or math.isnan(pr) else f"{pr:.3f}", sort_value=pr)
+
+                # 5 |r|
+                ar = r.get("abs_r", float("nan"))
+                put(5, "" if not isinstance(ar, float) or math.isnan(ar) else f"{ar:.3f}", sort_value=ar)
+
+                # 6 p (pearson)
+                pp = r.get("pearson_p", float("nan"))
+                put(6, "" if not isinstance(pp, float) or math.isnan(pp) else f"{pp:.3g}", sort_value=pp)
+
+                # 7 p_shift (pearson circular shift)
+                pps = r.get("pearson_p_shift", float("nan"))
+                put(7, "" if not isinstance(pps, float) or math.isnan(pps) else f"{pps:.3g}", sort_value=pps)
+
+                # 8 spearman_rho
+                sr = r.get("spearman_rho", float("nan"))
+                put(8, "" if not isinstance(sr, float) or math.isnan(sr) else f"{sr:.3f}", sort_value=sr)
+
+                # 9 p_s (spearman)
+                sp = r.get("spearman_p", float("nan"))
+                put(9, "" if not isinstance(sp, float) or math.isnan(sp) else f"{sp:.3g}", sort_value=sp)
+
+                # 10 years
+                years_txt = r.get("years", "")
+                put(10, years_txt)
+
+                # 11 plot
+                put(11, "click")
+
+                alpha = 0.05
+                ny = int(r.get("n_years", r.get("n", 0)) or 0)
+                pps = r.get("pearson_p_shift", float("nan"))
+
+                bad_p = (not isinstance(pps, float)) or math.isnan(pps) or (pps > alpha)
+                low_n = ny < 6
+
+                if low_n or bad_p:
+                    for c in range(self.batch_table.columnCount()):
+                        it = self.batch_table.item(i, c)
+                        if it:
+                            it.setFlags(it.flags() & ~Qt.ItemIsSelectable)
+
+
+                # индекс исходной строки для корректного клика после сортировки
+                self.batch_table.item(i, 0).setData(256, i)
+
+            self.batch_table.setUpdatesEnabled(True)
+            self.batch_table.setSortingEnabled(True)
+
+            # (опционально) сразу сортируем по |r| убыванию
+            self.batch_table.sortItems(5, Qt.DescendingOrder)
+
+            # ✅ вернуть нормальные пропорции справа после climate→batch
+            if hasattr(self, "right_splitter"):
+                self.right_splitter.setSizes([260, 640, 80])
+
+            self.batch_table.viewport().update()
+            self.batch_table.repaint()
+
+            self.output.setText(
+                f"BATCH DONE\n"
+                f"Eco: scale={scale}, metric={eco_metric}\n"
+                f"Filters: {filters}\n"
+                f"Combos: {total}\n"
+                f"Tip: click a row to plot scatter."
+            )
+        except Exception as e:
+            self.output.setText(f"run_batch ERROR:\n{type(e).__name__}: {e}")
+            raise
 
     def show_plot(self, plot_path: str):
         self._last_plot_path = plot_path
@@ -298,21 +554,31 @@ class MainWindow(QMainWindow):
         is_eco = (mode_code == "ecospectrum")
         is_climate = (mode_code == "climate")
         is_batch = (mode_code == "eco_vs_climate_batch")
+        is_panel = (mode_code == "panel_climate")
+        is_panel_batch = (mode_code == "panel_climate_batch")
 
-        # eco controls
-        self.eco_metric.setEnabled(is_eco or is_batch)
-        self.scale.setEnabled(is_eco or is_batch)
+        # eco controls (нужны и в panel тоже)
+        self.eco_metric.setEnabled(is_eco or is_batch or is_panel or is_panel_batch)
+        self.scale.setEnabled(is_eco or is_batch or is_panel or is_panel_batch)
 
         # main run buttons
-        self.run_btn.setVisible(not is_batch)
+        self.run_btn.setVisible(not (is_batch or is_panel_batch))
+        self.run_batch_btn.setVisible(is_batch or is_panel_batch)
 
         # climate controls
-        self.period_combo.setEnabled(is_climate)  # period_combo используется в одиночном climate-режиме
-        self.climate_var.setEnabled(is_climate or is_batch)  # NEW: выбор pedya/precip/t_mean
+        self.period_combo.setEnabled(is_climate or is_panel)  # period нужен в climate и panel
+        self.climate_var.setEnabled(is_climate or is_batch or is_panel or is_panel_batch)
 
-        # batch controls visibility
-        for w in [self.periods_edit, self.lags_edit, self.windows_edit, self.run_batch_btn, self.batch_table]:
-            w.setVisible(is_batch)
+        # batch controls visibility (для eco_vs_climate_batch и panel_climate_batch)
+        for w in [self.periods_edit, self.lags_edit, self.windows_edit, self.batch_table]:
+            w.setVisible(is_batch or is_panel_batch)
+
+        # plot/table visibility в panel single
+        if is_panel:
+            # self.batch_table.setVisible(False)  # в single panel можно без таблицы батча
+            self.plot_label.setVisible(False)
+        else:
+            self.plot_label.setVisible(True)  # чтобы другие режимы не “ломались”
 
         # site filters:
         # - in climate mode: disable (since climate is regional bbox)
@@ -320,6 +586,20 @@ class MainWindow(QMainWindow):
         self.river.setEnabled(not is_climate)
         self.geom.setEnabled(not is_climate)
         self.impact.setEnabled(not is_climate)
+        self.affor.setEnabled(not is_climate)
+
+        if hasattr(self, "right_splitter"):
+            mode = self.mode.currentData()
+
+            if mode == "eco_vs_climate_batch":
+                # таблица заметная + график + чуть лога
+                self.right_splitter.setSizes([260, 640, 80])
+            elif mode == "climate":
+                # в climate таблица может быть меньше, но не исчезать
+                self.right_splitter.setSizes([120, 760, 80])
+            else:
+                # на всякий случай
+                self.right_splitter.setSizes([220, 660, 80])
 
     def populate_dropdowns(self):
         try:
@@ -395,14 +675,18 @@ class MainWindow(QMainWindow):
         mode_text = self.mode.currentText()
         mode_code = self.mode.currentData()
 
-        msg = f"MODE DEBUG:\ntext='{mode_text}'\ncode='{mode_code}'"
-        if hasattr(self.output, "setPlainText"):
-            self.output.setPlainText(msg)
-        else:
-            self.output.setText(msg)
+        # msg = f"MODE DEBUG:\ntext='{mode_text}'\ncode='{mode_code}'"
+        # if hasattr(self.output, "setPlainText"):
+        #     self.output.setPlainText(msg)
+        # else:
+        #     self.output.setText(msg)
 
         # 1) Собираем фильтры из UI
         filters = {}
+
+        aff = self.affor.currentData()
+        if aff is not None:
+            filters["afforestation"] = {"in": aff}
 
         geom_value = self.geom.currentText()
         if geom_value != "All":
@@ -415,6 +699,14 @@ class MainWindow(QMainWindow):
         impact_value = self.impact.currentText()
         if impact_value != "All":
             filters["impact_type"] = impact_value
+
+        msg = (
+            "RUN\n"
+            f"text='{mode_text}'\n"
+            f"code='{mode_code}'\n"
+            f"filters={filters}"
+        )
+        self.output.setText(msg)
 
         # 2) Выбираем режим
         mode_code = self.mode.currentData()
@@ -481,6 +773,40 @@ class MainWindow(QMainWindow):
                 f"Rows: {len(df)}\n"
                 f"Plot: {plot_path}"
             )
+            return
+
+        if mode_code == "panel_climate":
+            try:
+                from core.panel_model import run_panel_model
+
+                aff = self.affor.currentData()  # None или список
+
+                spec = {
+                    "scale": self.scale.currentText(),
+                    "metric": self.eco_metric.currentText(),
+                    "climate_var": self.climate_var.currentText(),
+                    "period": self.period_combo.currentText(),
+                    "lag": 0,
+                    "window": 1,
+                    "filters": {
+                        "river": self.river.currentText(),
+                        "geomorph_level": self.geom.currentText(),
+                        "impact_type": self.impact.currentText(),
+                        "afforestation": aff,
+                    },
+                }
+
+                df = run_panel_model(spec)
+
+                # ВАЖНО: принудительно показать таблицу
+                self.batch_table.setVisible(True)
+                self._show_df_in_table(df)
+
+                self.output.setText(f"PANEL OK\nn_rows={len(df)}\n{df.to_string(index=False)}")
+            except Exception as e:
+                import traceback
+                self.output.setText("PANEL ERROR:\n" + traceback.format_exc())
+
             return
 
         # --- CLASSIC MODE (как было) ---

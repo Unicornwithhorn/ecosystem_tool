@@ -6,7 +6,9 @@ from core.ecospectrum import compute_ecospectrum_by_description
 from core.analysis_engine import apply_filters
 import pandas as pd
 from pathlib import Path
+from scipy import stats
 import numpy as np
+from core.cache import get_or_compute_df
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PEDYA_PERIODS_CSV = PROJECT_ROOT / "data" / "processed" / "meteo_pedya_periods_1991_2020.csv"
@@ -141,38 +143,67 @@ def run_scenario(spec: ScenarioSpec):
     # ------------------------------------------------------------
     if analysis_kind == "eco_vs_climate":
         # ---- (A) build yearly eco metric via ecospectrum pipeline ----
-        df = load_processed()
 
         eco_filters = getattr(spec, "filters", {}) or {}
-        if eco_filters:
-            df = apply_filters(df, eco_filters)
-
-        # only abundance rows
-        df = df[df["abundance_class"].notna()].copy()
-
-        # weights
-        df = attach_weights(df, abundance_col="abundance_class", out_col="w")
-        df = df[df["w"].notna() & (df["w"] > 0)].copy()
-
-        # attach trait scale (default M)
         scale = getattr(spec, "trait_scale", "M")
-        df = attach_trait(df, scale=scale)
-
-        # ecospectrum per description
-        eco = compute_ecospectrum_by_description(df, trait_col=scale, weight_col="w")
-
-        # merge description metadata (need year)
-        meta_cols = ["description_id", "year"]
-        meta = df[meta_cols].drop_duplicates("description_id")
-        eco2 = eco.merge(meta, on="description_id", how="left")
-
-        # aggregate eco by year
         metric_name = getattr(spec, "eco_metric", "cwm")
-        eco_year = (
-            eco2.groupby(["year"], as_index=False)[metric_name]
-            .mean()
-            .rename(columns={metric_name: "eco"})
-            .sort_values("year")
+
+        # ключ кеша — ТОЛЬКО eco-постановка (без period/lag/window/climate_var!)
+        eco_cache_key = {
+            "analysis": "eco_vs_climate",
+            "filters": eco_filters,
+            "trait_scale": scale,
+            "eco_metric": metric_name,
+        }
+
+        # какие файлы определяют eco_year (если поменяются — кеш инвалидируется)
+        eco_input_paths = [
+            PROJECT_ROOT / "data" / "processed" / "observations.csv",
+            PROJECT_ROOT / "data" / "processed" / "descriptions.csv",
+            PROJECT_ROOT / "data" / "processed" / "profiles.csv",  # если нет — ок, будет MISSING
+        ]
+
+        def _compute_eco_year() -> pd.DataFrame:
+            df = load_processed()
+
+            if eco_filters:
+                df = apply_filters(df, eco_filters)
+
+            # only abundance rows
+            df = df[df["abundance_class"].notna()].copy()
+
+            # weights
+            df = attach_weights(df, abundance_col="abundance_class", out_col="w")
+            df = df[df["w"].notna() & (df["w"] > 0)].copy()
+
+            # attach trait scale (default M)
+            df = attach_trait(df, scale=scale)
+
+            # ecospectrum per description
+            eco = compute_ecospectrum_by_description(df, trait_col=scale, weight_col="w")
+
+            # merge description metadata (need year)
+            meta_cols = ["description_id", "year"]
+            meta = df[meta_cols].drop_duplicates("description_id")
+            eco2 = eco.merge(meta, on="description_id", how="left")
+
+            # aggregate eco by year
+            eco_year_local = (
+                eco2.groupby(["year"], as_index=False)[metric_name]
+                .mean()
+                .rename(columns={metric_name: "eco"})
+                .sort_values("year")
+            )
+            return eco_year_local
+
+        # ВОТ ОНА — “одна строка” по смыслу: eco_year теперь берётся из кеша
+        eco_year = get_or_compute_df(
+            namespace="eco_year",
+            payload=eco_cache_key,
+            input_paths=eco_input_paths,
+            compute_fn=_compute_eco_year,
+            use_disk=True,
+            use_memory=True,
         )
 
         # ---- (B) load climate from unified meteo_periods CSV ----
@@ -211,13 +242,49 @@ def run_scenario(spec: ScenarioSpec):
         # drop rows where signal undefined
         joined = joined.dropna(subset=["eco", "clim_signal"]).copy()
 
-        # ---- (E) correlation numbers ----
-        if len(joined) < 3:
-            pearson = float("nan")
-            spearman = float("nan")
-        else:
-            pearson = joined["eco"].corr(joined["clim_signal"], method="pearson")
-            spearman = joined["eco"].corr(joined["clim_signal"], method="spearman")
+        # ---- (E) correlation numbers + p-values ----
+        n_years = int(len(joined))
+        year_min = int(joined["year"].min()) if n_years else None
+        year_max = int(joined["year"].max()) if n_years else None
+
+        pearson = float("nan")
+        spearman = float("nan")
+        pearson_p = float("nan")
+        spearman_p = float("nan")
+        pearson_p_shift = float("nan")
+
+        if n_years >= 3:
+            x = joined["eco"].to_numpy(dtype=float)
+            y = joined["clim_signal"].to_numpy(dtype=float)
+
+            # SciPy: r and p-values
+            pear = stats.pearsonr(x, y)
+            spear = stats.spearmanr(x, y)
+
+            pearson = float(pear.statistic)
+            pearson_p = float(pear.pvalue)
+
+            spearman = float(spear.statistic)
+            spearman_p = float(spear.pvalue)
+
+            # Robust p-value: circular shift permutation (keeps temporal structure of y)
+            def circular_shift_pvalue(x, y, n_perm=999, seed=42):
+                x = np.asarray(x, float)
+                y = np.asarray(y, float)
+                n = len(x)
+                if n < 4:
+                    return float("nan")
+                rng = np.random.default_rng(seed)
+                r_obs = stats.pearsonr(x, y).statistic
+                shifts = rng.integers(1, n, size=n_perm)  # exclude 0 shift
+                cnt = 0
+                for k in shifts:
+                    r_k = stats.pearsonr(x, np.roll(y, k)).statistic
+                    if abs(r_k) >= abs(r_obs):
+                        cnt += 1
+                return (cnt + 1) / (n_perm + 1)  # add-one smoothing
+
+            pearson_p_shift = circular_shift_pvalue(x, y, n_perm=999, seed=42)
 
         # ---- (F) plot scatter ----
         plot_path = None
@@ -227,7 +294,8 @@ def run_scenario(spec: ScenarioSpec):
                 spec.plot["title"] = (
                     f"{metric_name}({scale}) vs {climate_var}({period}) | "
                     f"lag={lag}, window={window} | "
-                    f"r={pearson:.2f}, ρ={spearman:.2f}, n={len(joined)}"
+                    f"r={pearson:.2f} (p={pearson_p:.3g}, p_shift={pearson_p_shift:.3g}), "
+                    f"ρ={spearman:.2f} (p={spearman_p:.3g}), n={n_years}"
                 )
 
             out_name_default = f"eco_vs_{climate_var}_{period}_lag{lag}_win{window}"
@@ -245,7 +313,16 @@ def run_scenario(spec: ScenarioSpec):
 
         # return full table so you can inspect years and values
         joined["pearson_r"] = pearson
+        joined["pearson_p"] = pearson_p
+        joined["pearson_p_shift"] = pearson_p_shift
+
         joined["spearman_rho"] = spearman
+        joined["spearman_p"] = spearman_p
+
+        joined["n_years"] = n_years
+        joined["year_min"] = year_min
+        joined["year_max"] = year_max
+
         joined["climate_var"] = climate_var
         joined["period"] = period
         joined["lag"] = lag
@@ -267,7 +344,7 @@ def run_scenario(spec: ScenarioSpec):
 
         dfc = dfc.sort_values("year")
         climate_var = getattr(spec, "climate_var", "pedya")
-        result = dfc[["year", climate_var]].rename(columns={climate_var: "value"}).copy()
+        result = dfc[["year", climate_var]].copy()
 
         plot_path = plot_timeseries(result, spec.plot) if spec.plot else None
         return result, plot_path

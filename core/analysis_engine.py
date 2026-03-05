@@ -117,7 +117,14 @@ def apply_filters(df: pd.DataFrame, filters: FilterSpec | None) -> pd.DataFrame:
 
         if isinstance(rule, dict):
             if "in" in rule:
-                mask &= s.isin(rule["in"])
+                allowed = rule["in"]
+
+                # если это afforestation — приводим к числам
+                if col == "afforestation":
+                    s_num = pd.to_numeric(s, errors="coerce")
+                    mask &= s_num.isin(allowed)
+                else:
+                    mask &= s.isin(allowed)
             elif "between" in rule:
                 lo, hi = rule["between"]
                 s_num = pd.to_numeric(s, errors="coerce")
