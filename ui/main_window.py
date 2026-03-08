@@ -22,7 +22,7 @@ class MainWindow(QMainWindow):
         # -------------------------
         # Create widgets FIRST
         # -------------------------
-        self.river = QComboBox()
+        self.profile = QComboBox()
         self.geom = QComboBox()
         self.impact = QComboBox()
 
@@ -32,6 +32,8 @@ class MainWindow(QMainWindow):
         self.climate_var = QComboBox()
         self.eco_metric = QComboBox()
         self.affor = QComboBox()
+        self.lag_combo = QComboBox()
+        self.window_combo = QComboBox()
 
         self.periods_edit = QLineEdit()
         self.lags_edit = QLineEdit()
@@ -75,6 +77,7 @@ class MainWindow(QMainWindow):
         self.mode.addItem("Panel climate", "panel_climate")
         self.mode.addItem("Panel climate (batch)", "panel_climate_batch")
 
+
         # ellenberg scales
         for s in ["L", "T", "K", "F", "R", "N", "S", "M"]:
             self.scale.addItem(s)
@@ -94,6 +97,7 @@ class MainWindow(QMainWindow):
         self.lags_edit.setText("0,1,2")
         self.windows_edit.setText("1,2,3")
 
+
         # afforestation (облесённость)
         self.affor.addItem("All", None)
         self.affor.addItem("Луг (0)", [0])
@@ -101,6 +105,9 @@ class MainWindow(QMainWindow):
         self.affor.addItem("Лес (2)", [2])
         self.affor.addItem("Луг + редколесье (0,1)", [0, 1])
         self.affor.addItem("Редколесье + лес (1,2)", [1, 2])
+
+        self.lag_combo.addItems(["0", "1", "2"])
+        self.window_combo.addItems(["1", "2", "3"])
 
         central = QWidget()
         root_layout = QHBoxLayout(central)
@@ -117,8 +124,8 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(6)
 
         # ВАЖНО: сюда добавляем ВСЕ элементы меню (как раньше), но теперь в left_layout
-        left_layout.addWidget(QLabel("River"))
-        left_layout.addWidget(self.river)
+        left_layout.addWidget(QLabel("Profile"))
+        left_layout.addWidget(self.profile)
         left_layout.addWidget(QLabel("Geomorphology"))
         left_layout.addWidget(self.geom)
         left_layout.addWidget(QLabel("Impact type"))
@@ -133,6 +140,11 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.period_combo)
         left_layout.addWidget(QLabel("Climate variable:"))
         left_layout.addWidget(self.climate_var)
+        left_layout.addWidget(QLabel("Lag"))
+        left_layout.addWidget(self.lag_combo)
+
+        left_layout.addWidget(QLabel("Window"))
+        left_layout.addWidget(self.window_combo)
 
         left_layout.addWidget(QLabel("Batch periods (comma):"))
         left_layout.addWidget(self.periods_edit)
@@ -319,15 +331,13 @@ class MainWindow(QMainWindow):
             if aff is not None:
                 filters["afforestation"] = {"in": aff}
 
-            self.output.setText(f"Running batch...\nFilters: {filters}")
-
             geom_value = self.geom.currentText()
             if geom_value != "All":
                 filters["geomorph_level"] = geom_value
 
-            river_value = self.river.currentText()
-            if river_value != "All":
-                filters["source_file"] = {"contains": river_value}
+            profile_value = self.profile.currentText()
+            if profile_value != "All":
+                filters["source_file"] = profile_value
 
             impact_value = self.impact.currentText()
             if impact_value != "All":
@@ -556,6 +566,10 @@ class MainWindow(QMainWindow):
         is_batch = (mode_code == "eco_vs_climate_batch")
         is_panel = (mode_code == "panel_climate")
         is_panel_batch = (mode_code == "panel_climate_batch")
+        is_panel_batch = (mode_code == "panel_climate_batch")
+
+        self.lag_combo.setVisible(is_panel)
+        self.window_combo.setVisible(is_panel)
 
         # eco controls (нужны и в panel тоже)
         self.eco_metric.setEnabled(is_eco or is_batch or is_panel or is_panel_batch)
@@ -583,7 +597,6 @@ class MainWindow(QMainWindow):
         # site filters:
         # - in climate mode: disable (since climate is regional bbox)
         # - in batch mode: keep enabled (eco filters are needed)
-        self.river.setEnabled(not is_climate)
         self.geom.setEnabled(not is_climate)
         self.impact.setEnabled(not is_climate)
         self.affor.setEnabled(not is_climate)
@@ -618,15 +631,15 @@ class MainWindow(QMainWindow):
             self.run_btn.setEnabled(False)
             return
 
-        # --- Rivers ---
-        sf = df["source_file"].astype("string").fillna("")
-        rivers = (
-            sf.str.extract(r"^([^_\-\s]+)", expand=False)
+        # --- Profiles ---
+        profiles = (
+            df["source_file"]
+            .astype("string")
             .dropna()
             .unique()
             .tolist()
         )
-        rivers = sorted(rivers)
+        profiles = sorted([x for x in profiles if x and x != "nan"])
 
         # --- Geomorph levels ---
         geomorphs = (
@@ -649,12 +662,12 @@ class MainWindow(QMainWindow):
         impacts = sorted([x for x in impacts if x and x != "nan"])
 
         # --- Fill dropdowns ---
-        self.river.clear()
+        self.profile.clear()
         self.geom.clear()
         self.impact.clear()
 
-        self.river.addItem("All")
-        self.river.addItems(rivers)
+        self.profile.addItem("All")
+        self.profile.addItems(profiles)
 
         self.geom.addItem("All")
         self.geom.addItems(geomorphs)
@@ -662,11 +675,11 @@ class MainWindow(QMainWindow):
         self.impact.addItem("All")
         self.impact.addItems(impacts)
 
-        self.run_btn.setEnabled(bool(rivers) and bool(geomorphs))
+        self.run_btn.setEnabled(bool(profiles) and bool(geomorphs))
 
         self.output.setText(
             f"Loaded rows: {len(df)} | "
-            f"Rivers: {len(rivers)}, "
+            f"Profiles: {len(profiles)}, "
             f"Geomorph: {len(geomorphs)}, "
             f"Impact: {len(impacts)}"
         )
@@ -692,9 +705,9 @@ class MainWindow(QMainWindow):
         if geom_value != "All":
             filters["geomorph_level"] = geom_value
 
-        river_value = self.river.currentText()
-        if river_value != "All":
-            filters["source_file"] = {"contains": river_value}
+        profile_value = self.profile.currentText()
+        if profile_value != "All":
+            filters["source_file"] = profile_value
 
         impact_value = self.impact.currentText()
         if impact_value != "All":
@@ -779,21 +792,33 @@ class MainWindow(QMainWindow):
             try:
                 from core.panel_model import run_panel_model
 
-                aff = self.affor.currentData()  # None или список
+                aff = self.affor.currentData()
+
+                filters = {}
+
+                if aff is not None:
+                    filters["afforestation"] = aff
+
+                geom_value = self.geom.currentText()
+                if geom_value != "All":
+                    filters["geomorph_level"] = geom_value
+
+                impact_value = self.impact.currentText()
+                if impact_value != "All":
+                    filters["impact_type"] = impact_value
+
+                profile_value = self.profile.currentText()
+                if profile_value != "All":
+                    filters["source_file"] = profile_value
 
                 spec = {
                     "scale": self.scale.currentText(),
                     "metric": self.eco_metric.currentText(),
                     "climate_var": self.climate_var.currentText(),
                     "period": self.period_combo.currentText(),
-                    "lag": 0,
-                    "window": 1,
-                    "filters": {
-                        "river": self.river.currentText(),
-                        "geomorph_level": self.geom.currentText(),
-                        "impact_type": self.impact.currentText(),
-                        "afforestation": aff,
-                    },
+                    "lag": int(self.lag_combo.currentText()),
+                    "window": int(self.window_combo.currentText()),
+                    "filters": filters,
                 }
 
                 df = run_panel_model(spec)

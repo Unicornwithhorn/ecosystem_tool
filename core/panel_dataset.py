@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
-import pandas as pd
 
 from core.analysis_engine import load_processed, apply_filters
 from core.ecospectrum import compute_ecospectrum_by_description
@@ -12,30 +10,10 @@ from core.abundance import attach_weights  # если у тебя так наз�
 # core/panel_model.py
 from pathlib import Path
 import pandas as pd
-import numpy as np
-import statsmodels.formula.api as smf
-
-from core.panel_dataset import build_panel_eco_dataset
-from core.panel_dataset import PanelEcoSpec  # если у тебя есть dataclass/spec
 
 # --- Настройки вывода ---
 PROCESSED_DIR = Path("data/processed")
 
-
-
-
-
-def _ensure_panel_eco(scale: str, metric: str) -> str:
-    out_path = Path(f"data/processed/panel_eco_{scale}_{metric}.csv")
-    if out_path.exists():
-        return str(out_path)
-
-    # строим автоматически
-    spec = PanelEcoSpec(trait_scale=scale, eco_metric=metric)  # имена полей подстрой под твой spec
-    df = build_panel_eco_dataset(spec)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(out_path, index=False)
-    return str(out_path)
 
 def make_site_id(df_desc: pd.DataFrame) -> pd.Series:
     """
@@ -107,17 +85,23 @@ def build_panel_eco_dataset(spec: PanelEcoSpec) -> pd.DataFrame:
     print("NA in afforestation before aggregation:",
           df["afforestation"].isna().sum())
 
+    agg_map = {
+        "year": "first",
+        "profile_id": "first",
+        "cross_section_number": "first",
+        "point_number": "first",
+        "source_file": "first",
+        "afforestation": "max",
+        "geomorph_level": "first",
+        "impact_type": "first",
+    }
+
+    if "river" in df.columns:
+        agg_map["river"] = "first"
+
     desc_meta = (
         df.groupby("description_id", as_index=False)
-        .agg({
-            "year": "first",
-            "profile_id": "first",
-            "cross_section_number": "first",
-            "point_number": "first",
-            "afforestation": "max",  # важно!
-            "geomorph_level": "first",
-            "impact_type": "first",
-        })
+        .agg(agg_map)
     )
     desc_meta["site_id"] = make_site_id(desc_meta)
 
@@ -131,17 +115,23 @@ def build_panel_eco_dataset(spec: PanelEcoSpec) -> pd.DataFrame:
         )
 
     # 7) Aggregate to site_id x year
+    agg_kwargs = {
+        "eco": (spec.eco_metric, "mean"),
+        "n_desc": ("description_id", "nunique"),
+        "afforestation": ("afforestation", "first"),
+        "geomorph_level": ("geomorph_level", "first"),
+        "impact_type": ("impact_type", "first"),
+        "profile_id": ("profile_id", "first"),
+        "source_file": ("source_file", "first"),
+    }
+
+    if "river" in eco_desc.columns:
+        agg_kwargs["river"] = ("river", "first")
+
     panel = (
         eco_desc
         .groupby(["site_id", "year"], as_index=False)
-        .agg(
-            eco=(spec.eco_metric, "mean"),
-            n_desc=("description_id", "nunique"),
-            afforestation=("afforestation", "first"),
-            geomorph_level=("geomorph_level", "first"),
-            impact_type=("impact_type", "first"),
-            **({"river": ("river", "first")} if "river" in eco_desc.columns else {}),
-        )
+        .agg(**agg_kwargs)
     )
 
     # 8) Basic cleanup / types
